@@ -1,0 +1,102 @@
+
+(import 
+ :from numpy :import linspace logspace log10 :and
+ :from hlab :import objstream :and
+ :from hlab.pathutils :import FilePath DirPath :and
+ :from jamenson.runtime.collections :import OrderedSet :and
+)
+
+(defun as-objstream (op)
+  (when (isinstance op str)
+    (setq op (objstream.open_cached_locators op)))
+  (assert (isinstance op objstream.Reader))
+  op)
+
+(defun make-finder-state (objstream &keys load-index-time index-memo (epsilon 1e-9) (min-index 1) max-index)
+  (let ((objstream (as-objstream objstream)))
+    (obj :objstream (as-objstream objstream)
+         :load-index-time (if (null load-index-time)
+                              (lambda (inx)
+                                (attr (item objstream inx) time))
+                              load-index-time)
+         :min-index min-index
+         :max-index (if (null max-index)
+                        (1- (len objstream))
+                        max-index)
+         :index-memo (if (null index-memo)
+                         (dict)
+                         index-memo)
+         :epsilon epsilon)))
+
+(defun get-time-by-index (state i)
+  (try-catch 
+   (item state.index-memo i)
+   (KeyError
+    (setf (item state.index-memo i)
+          (state.load-index-time i)))))
+
+(defun find-config-index (state target)
+  (flet ((nanoeq (a b)
+           (< (abs (- a b))
+              state.epsilon))
+         (t-delta (i)
+           (abs (- (get-time-by-index state i)
+                   target)))
+         (chose (a b)
+           (if (< (t-delta a) (t-delta b))
+               a b))
+         (rec (a b)
+           (let* ((m (int (round (* 0.5 (+ a b)))))
+                  (t_m (get-time-by-index state m)))
+             (cond ((nanoeq target t_m)
+                    m)
+                   ((or (eq a t_m))
+                    (chose m b))
+                   ((or (eq m b))
+                    (chose m a))
+                   ((> t_m target)
+                    (rec a m))
+                   (t
+                    (rec m b))))))
+    (rec state.min-index state.max-index)))
+
+(defun find-config (state target)
+  (item state.objstream (find-config-index state target)))
+
+(defun iter-times (state times)
+  (for (time times)
+    (yield (find-config state time)))
+  (return None))
+
+(defun iter-fixed-times (state times)
+  (let ((seen (set)))
+    (for (config (iter-times state (OrderedSet (sorted times))))
+      (unless (in config.time seen)
+        (seen.add config.time)
+        (yield config))))
+  (return None))
+
+(defun iter-space-times (fp space &keys (number 50) (start 0) (end None))
+  (let ((state (if (not (isinstance fp obj))
+                   (make-finder-state fp)
+                   fp)))
+    (iter-fixed-times state
+     (space (or start 0)
+            (if (is end None)
+                (attr (item state.objstream -1) time)
+                end)
+            number))))
+
+(defun iter-linear-times (fp &rest args &remaining-keys keys)
+  (iter-space-times fp linspace &rest args &remaining-keys keys))
+
+(defun iter-logspace-times (fp &rest args &remaining-keys keys)
+  (iter-space-times fp (lambda (start end number)
+                         (logspace (if start (log10 start) -9) (log10 end) number))
+                    &rest args &remaining-keys keys))
+
+(defun map-linear-times (func fp &rest args &remaining-keys keys)
+  (map func (iter-linear-times fp &rest args &remaining-keys keys)))
+
+(defun map-logspace-times (func fp &rest args &remaining-keys keys)
+  (map func (iter-logspace-times fp &rest args &remaining-keys keys)))
